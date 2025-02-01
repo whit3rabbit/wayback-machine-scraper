@@ -88,8 +88,9 @@ class WaybackMachineMiddleware:
                     return Response(meta['wayback_machine_original_request'].url, status=404)
                 
                 # Schedule all snapshot requests
+                # Add requests to scheduler instead of trying to crawl directly
                 for snapshot_request in snapshot_requests:
-                    self.crawler.engine.schedule(snapshot_request, spider)
+                    self.crawler.engine.slot.scheduler.enqueue_request(snapshot_request)
                 
                 return Response(meta['wayback_machine_original_request'].url, status=200)
             except Exception as e:
