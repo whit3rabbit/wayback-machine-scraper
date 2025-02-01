@@ -39,8 +39,10 @@ class WaybackMachineMiddleware:
         def parse_time(time):
             if isinstance(time, (int, float, str)):
                 time = int(time)
+                # If already a realistic Unix timestamp, return it.
                 if 10**8 < time < 10**13:
                     return time
+                # Otherwise, assume it's an archive.org timestamp (possibly truncated)
                 time_string = str(time)[::-1].zfill(14)[::-1]
                 time = datetime.strptime(time_string, self.timestamp_format)
                 time = time.replace(tzinfo=timezone.utc)
@@ -56,35 +58,42 @@ class WaybackMachineMiddleware:
         # Ignore robots.txt requests.
         if request.url == self.robots_txt:
             return
+
         # Let Wayback Machine requests pass through.
         if request.meta.get('wayback_machine_url'):
             return
         if request.meta.get('wayback_machine_cdx_request'):
             return
-        # Otherwise, build a CDX request.
+
+        # Otherwise, request a CDX listing of available snapshots.
         return self.build_cdx_request(request)
 
     def process_response(self, request, response, spider):
         meta = request.meta
-        # If this is a CDX request, parse its response and schedule snapshot requests.
+
+        # Process CDX responses and schedule snapshot requests.
         if meta.get('wayback_machine_cdx_request'):
             snapshot_requests = self.build_snapshot_requests(response, meta)
+            # Treat empty listings as 404s.
             if len(snapshot_requests) < 1:
                 return Response(meta['wayback_machine_original_request'].url, status=404)
+            # Schedule all snapshot requests using the new API.
             for snapshot_request in snapshot_requests:
                 try:
-                    # Enqueue and schedule using the latest Scrapy API.
                     self.crawler.engine.slot.scheduler.enqueue_request(snapshot_request)
-                    self.crawler.engine.crawl(snapshot_request, spider)
+                    self.crawler.engine.crawl(snapshot_request)
                     logger.debug("Scheduled snapshot request: %s", snapshot_request.url)
                 except Exception as e:
                     logger.error("Error scheduling snapshot request: %s", e)
+            # Abort processing of the original CDX request.
             raise UnhandledIgnoreRequest("Aborting original request in favor of snapshot requests")
+
         # For snapshot responses, restore the original URL.
         if meta.get('wayback_machine_url'):
             original_request = meta.get('wayback_machine_original_request')
             if original_request:
                 return response.replace(url=original_request.url)
+
         return response
 
     def build_cdx_request(self, request):
@@ -132,6 +141,7 @@ class WaybackMachineMiddleware:
                 'wayback_machine_time': snapshot['datetime'],
             })
             snapshot_requests.append(snapshot_request)
+
         return snapshot_requests
 
     def filter_snapshots(self, snapshots):
