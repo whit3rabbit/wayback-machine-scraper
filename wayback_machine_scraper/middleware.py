@@ -8,7 +8,7 @@ except ImportError:
 
 from scrapy import Request
 from scrapy.http import Response
-from scrapy.exceptions import NotConfigured
+from scrapy.exceptions import NotConfigured, IgnoreRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,9 @@ class WaybackMachineMiddleware:
     
     def __init__(self, crawler):
         self.crawler = crawler
+        # Set log level to DEBUG for development
+        logger.setLevel(logging.DEBUG)
+        
         time_range = crawler.settings.get('WAYBACK_MACHINE_TIME_RANGE')
         if not time_range:
             raise NotConfigured("WAYBACK_MACHINE_TIME_RANGE not configured")
@@ -53,59 +56,55 @@ class WaybackMachineMiddleware:
         if None in parsed_times:
             raise NotConfigured("Invalid time range format")
         self.time_range = parsed_times
+        logger.debug(f"Set time range to: {self.time_range}")
 
     def process_request(self, request, spider):
+        logger.debug(f"Processing request: {request.url}")
+        
         # Ignore robots.txt requests
         if request.url == self.robots_txt:
+            logger.debug("Ignoring robots.txt request")
             return None
 
         # Let Wayback Machine requests pass through
         if request.meta.get('wayback_machine_url'):
+            logger.debug("Letting wayback machine request pass through")
             return None
         if request.meta.get('wayback_machine_cdx_request'):
+            logger.debug("Letting CDX request pass through")
             return None
 
-        # Otherwise, request a CDX listing of available snapshots
+        # Build CDX request
         try:
-            return self.build_cdx_request(request)
+            cdx_request = self.build_cdx_request(request)
+            if cdx_request:
+                logger.debug(f"Built CDX request: {cdx_request.url}")
+                return cdx_request
+            return None
         except Exception as e:
             logger.error(f"Error building CDX request for {request.url}: {str(e)}")
             return None
 
     def process_response(self, request, response, spider):
+        logger.debug(f"Processing response: {response.url} (status: {response.status})")
         meta = request.meta
-
-        # Handle error status codes
-        if response.status >= 400 and not meta.get('wayback_machine_cdx_request'):
-            logger.warning(f"Received {response.status} for {response.url}")
-            if response.status == 404:
-                return response
-            if response.status >= 500:
-                # Retry server errors
-                retries = meta.get('retry_times', 0)
-                if retries < 3:
-                    meta['retry_times'] = retries + 1
-                    new_request = request.copy()
-                    new_request.dont_filter = True
-                    new_request.meta.update(meta)
-                    return new_request
-            return response
 
         # Process CDX responses
         if meta.get('wayback_machine_cdx_request'):
             try:
-                # Log the response for debugging
-                logger.debug(f"CDX Response Text: {response.text[:500]}...")
+                logger.debug(f"Processing CDX response: {response.text[:500]}...")
                 
                 snapshot_requests = self.build_snapshot_requests(response, meta)
                 if not snapshot_requests:
                     logger.info(f"No snapshots found for {meta['wayback_machine_original_request'].url}")
                     return Response(meta['wayback_machine_original_request'].url, status=404)
                 
+                logger.debug(f"Found {len(snapshot_requests)} snapshots")
+                
                 # Add requests to scheduler
                 for snapshot_request in snapshot_requests:
                     try:
-                        self.crawler.engine.slot.scheduler.enqueue_request(snapshot_request)
+                        self.crawler.engine.crawl(snapshot_request)
                         logger.debug(f"Enqueued snapshot request: {snapshot_request.url}")
                     except Exception as e:
                         logger.error(f"Failed to enqueue request {snapshot_request.url}: {str(e)}")
@@ -117,6 +116,7 @@ class WaybackMachineMiddleware:
 
         # For snapshot responses, restore the original URL
         if meta.get('wayback_machine_url'):
+            logger.debug("Processing wayback machine response")
             original_request = meta.get('wayback_machine_original_request')
             if original_request:
                 return response.replace(url=original_request.url)
@@ -125,30 +125,31 @@ class WaybackMachineMiddleware:
 
     def build_cdx_request(self, request):
         try:
-            # Split URL into parts and ensure proper encoding
+            # Remove scheme and query parameters for CDX URL
             url = request.url
             if '://' in url:
-                # Remove port number if present and normalize the URL
-                base_url = url.split('://', 1)[1].split(':', 1)[0].strip('/')
-                if not base_url:
-                    base_url = url
-            else:
-                base_url = url.strip('/')
-
-            # Build CDX URL with proper encoding
+                url = url.split('://', 1)[1]
+            url = url.split('?')[0].split('#')[0]  # Remove query params and fragments
+            
+            # Ensure no trailing slash
+            url = url.rstrip('/')
+            
+            # Build CDX URL
             cdx_url = 'https://web.archive.org/cdx/search/cdx'
-            cdx_url += '?url=' + pathname2url(base_url)
+            cdx_url += '?url=' + pathname2url(url)
             cdx_url += '&output=json&fl=timestamp,original,statuscode,digest'
-
+            
             logger.debug(f"Built CDX URL: {cdx_url}")
             
+            # Create request with metadata
             cdx_request = Request(
                 url=cdx_url,
+                callback=None,  # Let Scrapy handle it
                 dont_filter=True,
                 meta={
                     'wayback_machine_original_request': request,
                     'wayback_machine_cdx_request': True,
-                    'handle_httpstatus_list': list(range(400, 600))  # Handle all error status codes
+                    'handle_httpstatus_list': list(range(400, 600))
                 }
             )
             return cdx_request
@@ -159,50 +160,59 @@ class WaybackMachineMiddleware:
     def build_snapshot_requests(self, response, meta):
         try:
             data = json.loads(response.text)
-        except json.decoder.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in CDX response: {str(e)}")
-            return []
+            if not data or len(data) < 2:
+                logger.debug("No data in CDX response")
+                return []
 
-        if len(data) < 2:
-            logger.debug("No snapshot data found in CDX response")
-            return []
+            keys, rows = data[0], data[1:]
+            logger.debug(f"Found {len(rows)} CDX entries")
 
-        keys, rows = data[0], data[1:]
-        
-        def build_dict(row):
-            new_dict = {}
-            for i, key in enumerate(keys):
-                if key == 'timestamp':
-                    try:
-                        time = datetime.strptime(row[i], self.timestamp_format)
-                        new_dict['datetime'] = time.replace(tzinfo=timezone.utc)
-                    except ValueError as e:
-                        logger.error(f"Error parsing timestamp {row[i]}: {str(e)}")
-                        new_dict['datetime'] = None
-                new_dict[key] = row[i]
-            return new_dict
+            snapshots = []
+            for row in rows:
+                snapshot = {}
+                for i, key in enumerate(keys):
+                    if key == 'timestamp':
+                        try:
+                            time = datetime.strptime(row[i], self.timestamp_format)
+                            snapshot['datetime'] = time.replace(tzinfo=timezone.utc)
+                        except ValueError:
+                            snapshot['datetime'] = None
+                    snapshot[key] = row[i]
+                if snapshot['datetime']:  # Only add if timestamp parsed successfully
+                    snapshots.append(snapshot)
 
-        snapshots = list(map(build_dict, rows))
-        filtered_snapshots = self.filter_snapshots(snapshots)
-        snapshot_requests = []
+            filtered_snapshots = self.filter_snapshots(snapshots)
+            logger.debug(f"Filtered to {len(filtered_snapshots)} snapshots")
 
-        for snapshot in filtered_snapshots:
-            try:
-                url = self.snapshot_url_template.format(**snapshot)
-                original_request = meta['wayback_machine_original_request']
-                snapshot_request = original_request.replace(url=url, dont_filter=True)
-                snapshot_request.meta.update({
-                    'wayback_machine_original_request': original_request,
-                    'wayback_machine_url': url,
-                    'wayback_machine_time': snapshot['datetime'],
-                    'handle_httpstatus_list': list(range(400, 600))  # Handle all error status codes
-                })
+            snapshot_requests = []
+            original_request = meta['wayback_machine_original_request']
+
+            for snapshot in filtered_snapshots:
+                url = self.snapshot_url_template.format(
+                    timestamp=snapshot['timestamp'],
+                    original=snapshot['original']
+                )
+                snapshot_request = original_request.replace(
+                    url=url,
+                    dont_filter=True,
+                    meta={
+                        'wayback_machine_original_request': original_request,
+                        'wayback_machine_url': url,
+                        'wayback_machine_time': snapshot['datetime'],
+                        'handle_httpstatus_list': list(range(400, 600))
+                    }
+                )
                 snapshot_requests.append(snapshot_request)
-            except Exception as e:
-                logger.error(f"Error building snapshot request: {str(e)}")
-                continue
 
-        return snapshot_requests
+            logger.debug(f"Created {len(snapshot_requests)} snapshot requests")
+            return snapshot_requests
+
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in CDX response: {str(e)}")
+            return []
+        except Exception as e:
+            logger.error(f"Error building snapshot requests: {str(e)}")
+            return []
 
     def filter_snapshots(self, snapshots):
         filtered_snapshots = []
