@@ -22,13 +22,10 @@ class MirrorSpider(CrawlSpider):
         self.rules = (
             Rule(LinkExtractor(allow=allow, deny=deny), callback='save_page'),
         )
+        self._compile_rules()  # Compile the rules so self._rules is set
 
         # initialize allowed_domains list
         self.allowed_domains = []
-
-        # if a domain is explicitly passed via kwargs, add it
-        if 'domain' in kwargs:
-            self.allowed_domains.append(kwargs['domain'])
 
         # Add common archive domains unconditionally
         archive_domains = ['archive.org', 'web.archive.org', 'wayback.archive.org']
@@ -56,7 +53,8 @@ class MirrorSpider(CrawlSpider):
         for rule in self._rules:
             if rule.link_extractor._link_allowed(response):
                 if rule.callback:
-                    rule.callback(response)
+                    callback = getattr(self, rule.callback)
+                    return callback(response)
 
     def save_page(self, response):
         # Ignore 404s

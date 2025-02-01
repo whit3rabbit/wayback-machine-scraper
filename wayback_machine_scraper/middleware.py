@@ -86,7 +86,7 @@ class WaybackMachineMiddleware:
                 except Exception as e:
                     logger.error("Error scheduling snapshot request: %s", e)
             # Abort processing of the original CDX request.
-            raise UnhandledIgnoreRequest("Aborting original request in favor of snapshot requests")
+            return Response(meta['wayback_machine_original_request'].url, status=204)
 
         # For snapshot responses, restore the original URL.
         if meta.get('wayback_machine_url'):

@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('-d', '--deny', metavar='REGEX', default=(), help=(
         'A regular expression to exclude matched URLs.'
     ))
-    parser.add_argument('-c', '--concurrency', default=10.0, help=(
+    parser.add_argument('-c', '--concurrency', type=float, default=10.0, help=(
         'Target concurrency for crawl requests. '
         'The crawl rate will be automatically adjusted to match this target. '
         'Use values less than 1 to be polite and higher values to scrape more quickly.'
