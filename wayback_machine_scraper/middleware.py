@@ -84,37 +84,38 @@ class WaybackMachineMiddleware:
             return None
 
     def process_response(self, request, response, spider):
-        logger.debug(f"Processing response: {response.url} (status: {response.status})")
+        """Process the response."""
+        self.logger.debug(f"Processing response: {response.url} (status: {response.status})")
         meta = request.meta
 
         # Process CDX responses
         if meta.get('wayback_machine_cdx_request'):
             try:
-                logger.debug(f"Processing CDX response: {response.text[:500]}...")
+                self.logger.debug(f"Got CDX response text: {response.text[:1000]}")
                 
                 snapshot_requests = self.build_snapshot_requests(response, meta)
                 if not snapshot_requests:
-                    logger.info(f"No snapshots found for {meta['wayback_machine_original_request'].url}")
+                    self.logger.info(f"No snapshots found for {meta['wayback_machine_original_request'].url}")
                     return Response(meta['wayback_machine_original_request'].url, status=404)
                 
-                logger.debug(f"Found {len(snapshot_requests)} snapshots")
+                self.logger.debug(f"Built {len(snapshot_requests)} snapshot requests")
                 
                 # Add requests to scheduler
                 for snapshot_request in snapshot_requests:
                     try:
                         self.crawler.engine.crawl(snapshot_request)
-                        logger.debug(f"Enqueued snapshot request: {snapshot_request.url}")
+                        self.logger.debug(f"Scheduled snapshot request: {snapshot_request.url}")
                     except Exception as e:
-                        logger.error(f"Failed to enqueue request {snapshot_request.url}: {str(e)}")
+                        self.logger.error(f"Failed to schedule request {snapshot_request.url}: {str(e)}", exc_info=True)
                 
                 return Response(meta['wayback_machine_original_request'].url, status=200)
             except Exception as e:
-                logger.error(f"Error processing CDX response: {str(e)}\nResponse text: {response.text[:500]}")
+                self.logger.error(f"Error processing CDX response: {str(e)}", exc_info=True)
                 return response
 
         # For snapshot responses, restore the original URL
         if meta.get('wayback_machine_url'):
-            logger.debug("Processing wayback machine response")
+            self.logger.debug("Processing wayback machine response")
             original_request = meta.get('wayback_machine_original_request')
             if original_request:
                 return response.replace(url=original_request.url)
@@ -211,3 +212,48 @@ class WaybackMachineMiddleware:
         except Exception as e:
             logger.error(f"Error building snapshot requests: {str(e)}")
             return []
+        
+    def filter_snapshots(self, snapshots):
+            """Filter snapshots based on time range and remove duplicates."""
+            self.logger.debug(f"Filtering {len(snapshots)} snapshots")
+            filtered_snapshots = []
+            initial_snapshot = None
+            last_digest = None
+
+            for snapshot in snapshots:
+                if not snapshot['datetime']:
+                    continue
+                    
+                timestamp = snapshot['datetime'].timestamp()
+                
+                # Skip entries with invalid status codes
+                if not snapshot['statuscode'].isdigit():
+                    continue
+                
+                status_code = int(snapshot['statuscode'])
+                # Skip redirect status codes and error codes
+                if status_code >= 300:
+                    continue
+
+                if not filtered_snapshots:
+                    if timestamp > self.time_range[0]:
+                        if initial_snapshot:
+                            filtered_snapshots.append(initial_snapshot)
+                            last_digest = initial_snapshot['digest']
+                    else:
+                        initial_snapshot = snapshot
+                        
+                if timestamp < self.time_range[0]:
+                    continue
+                    
+                if timestamp > self.time_range[1]:
+                    break
+                    
+                if last_digest == snapshot['digest']:
+                    continue
+                    
+                last_digest = snapshot['digest']
+                filtered_snapshots.append(snapshot)
+
+            self.logger.debug(f"Filtered to {len(filtered_snapshots)} snapshots")
+            return filtered_snapshots
