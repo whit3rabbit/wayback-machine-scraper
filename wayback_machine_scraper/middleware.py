@@ -8,7 +8,7 @@ except ImportError:
 
 from scrapy import Request
 from scrapy.http import Response
-from scrapy.exceptions import NotConfigured, IgnoreRequest
+from scrapy.exceptions import NotConfigured
 import logging
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class WaybackMachineMiddleware:
                 
                 # Schedule all snapshot requests
                 for snapshot_request in snapshot_requests:
-                    self.crawler.engine.crawl(snapshot_request, spider)
+                    self.crawler.engine.schedule(snapshot_request, spider)
                 
                 return Response(meta['wayback_machine_original_request'].url, status=200)
             except Exception as e:

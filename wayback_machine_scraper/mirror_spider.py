@@ -1,5 +1,4 @@
 import os
-from datetime import datetime
 
 try:
     from urllib.parse import quote_plus
@@ -8,7 +7,8 @@ except ImportError:
 
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.linkextractors import LinkExtractor
-from scrapy.exceptions import DropItem
+
+from .middleware import WaybackMachineMiddleware
 
 class MirrorSpider(CrawlSpider):
     name = 'mirror_spider'
