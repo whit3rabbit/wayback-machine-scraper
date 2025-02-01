@@ -1,4 +1,5 @@
 import argparse
+import logging
 from pkg_resources import get_distribution
 
 from scrapy.crawler import CrawlerProcess
@@ -6,10 +7,10 @@ from scrapy.settings import Settings
 
 from .mirror_spider import MirrorSpider
 
-
 def main():
     # configure the settings for the crawler and spider
     args = parse_args()
+    
     config = {
         'domains': args.domains,
         'directory': args.output,
@@ -17,6 +18,7 @@ def main():
         'deny': args.deny,
         'unix': args.unix,
     }
+    
     settings = Settings({
         'USER_AGENT': (
             'Wayback Machine Scraper/{0} '
@@ -31,7 +33,12 @@ def main():
         'AUTOTHROTTLE_START_DELAY': 1,
         'AUTOTHROTTLE_TARGET_CONCURRENCY': args.concurrency,
         'WAYBACK_MACHINE_TIME_RANGE': (args.from_time, args.to),
+        'LOG_FORMAT': '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        'LOG_DATEFORMAT': '%Y-%m-%d %H:%M:%S',
     })
+
+    # Set up root logger
+    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     # start the crawler
     process = CrawlerProcess(settings)

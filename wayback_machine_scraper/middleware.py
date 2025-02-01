@@ -22,9 +22,7 @@ class WaybackMachineMiddleware:
     
     def __init__(self, crawler):
         self.crawler = crawler
-        # Set log level to DEBUG for development
-        logger.setLevel(logging.DEBUG)
-        
+        self.logger = logging.getLogger(self.__class__.__name__)
         time_range = crawler.settings.get('WAYBACK_MACHINE_TIME_RANGE')
         if not time_range:
             raise NotConfigured("WAYBACK_MACHINE_TIME_RANGE not configured")
@@ -213,45 +211,3 @@ class WaybackMachineMiddleware:
         except Exception as e:
             logger.error(f"Error building snapshot requests: {str(e)}")
             return []
-
-    def filter_snapshots(self, snapshots):
-        filtered_snapshots = []
-        initial_snapshot = None
-        last_digest = None
-
-        for snapshot in snapshots:
-            if not snapshot['datetime']:
-                continue
-                
-            timestamp = snapshot['datetime'].timestamp()
-            
-            # Skip entries with invalid status codes
-            if not snapshot['statuscode'].isdigit():
-                continue
-            
-            status_code = int(snapshot['statuscode'])
-            # Skip redirect status codes and error codes
-            if status_code >= 300:
-                continue
-
-            if not filtered_snapshots:
-                if timestamp > self.time_range[0]:
-                    if initial_snapshot:
-                        filtered_snapshots.append(initial_snapshot)
-                        last_digest = initial_snapshot['digest']
-                else:
-                    initial_snapshot = snapshot
-                    
-            if timestamp < self.time_range[0]:
-                continue
-                
-            if timestamp > self.time_range[1]:
-                break
-                
-            if last_digest == snapshot['digest']:
-                continue
-                
-            last_digest = snapshot['digest']
-            filtered_snapshots.append(snapshot)
-
-        return filtered_snapshots
