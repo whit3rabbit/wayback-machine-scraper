@@ -14,22 +14,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 class WaybackMachineMiddleware:
-    cdx_url_template = ('https://web.archive.org/cdx/search/cdx?url={url}'
-                       '&output=json&fl=timestamp,original,statuscode,digest')
-    snapshot_url_template = 'https://web.archive.org/web/{timestamp}id_/{original}'
+    """Middleware to handle Wayback Machine requests and responses."""
+    
     robots_txt = 'https://web.archive.org/robots.txt'
     timestamp_format = '%Y%m%d%H%M%S'
-
+    snapshot_url_template = 'https://web.archive.org/web/{timestamp}id_/{original}'
+    
     def __init__(self, crawler):
         self.crawler = crawler
-        # Read the settings
         time_range = crawler.settings.get('WAYBACK_MACHINE_TIME_RANGE')
         if not time_range:
             raise NotConfigured("WAYBACK_MACHINE_TIME_RANGE not configured")
         self.set_time_range(time_range)
 
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler)
+
     def set_time_range(self, time_range):
-        # Allow a single time to be passed instead of a range
         if not isinstance(time_range, (tuple, list)):
             time_range = (time_range, time_range)
 
@@ -37,10 +39,8 @@ class WaybackMachineMiddleware:
             try:
                 if isinstance(time, (int, float, str)):
                     time = int(str(time))
-                    # If already a realistic Unix timestamp, return it
                     if 10**8 < time < 10**13:
                         return time
-                    # Otherwise, assume it's an archive.org timestamp (possibly truncated)
                     time_string = str(time)[::-1].zfill(14)[::-1]
                     time = datetime.strptime(time_string, self.timestamp_format)
                     time = time.replace(tzinfo=timezone.utc)
@@ -53,10 +53,6 @@ class WaybackMachineMiddleware:
         if None in parsed_times:
             raise NotConfigured("Invalid time range format")
         self.time_range = parsed_times
-
-    @classmethod
-    def from_crawler(cls, crawler):
-        return cls(crawler)
 
     def process_request(self, request, spider):
         # Ignore robots.txt requests
@@ -79,22 +75,44 @@ class WaybackMachineMiddleware:
     def process_response(self, request, response, spider):
         meta = request.meta
 
-        # Process CDX responses and schedule snapshot requests
+        # Handle error status codes
+        if response.status >= 400 and not meta.get('wayback_machine_cdx_request'):
+            logger.warning(f"Received {response.status} for {response.url}")
+            if response.status == 404:
+                return response
+            if response.status >= 500:
+                # Retry server errors
+                retries = meta.get('retry_times', 0)
+                if retries < 3:
+                    meta['retry_times'] = retries + 1
+                    new_request = request.copy()
+                    new_request.dont_filter = True
+                    new_request.meta.update(meta)
+                    return new_request
+            return response
+
+        # Process CDX responses
         if meta.get('wayback_machine_cdx_request'):
             try:
+                # Log the response for debugging
+                logger.debug(f"CDX Response Text: {response.text[:500]}...")
+                
                 snapshot_requests = self.build_snapshot_requests(response, meta)
                 if not snapshot_requests:
                     logger.info(f"No snapshots found for {meta['wayback_machine_original_request'].url}")
                     return Response(meta['wayback_machine_original_request'].url, status=404)
                 
-                # Schedule all snapshot requests
-                # Add requests to scheduler instead of trying to crawl directly
+                # Add requests to scheduler
                 for snapshot_request in snapshot_requests:
-                    self.crawler.engine.slot.scheduler.enqueue_request(snapshot_request)
+                    try:
+                        self.crawler.engine.slot.scheduler.enqueue_request(snapshot_request)
+                        logger.debug(f"Enqueued snapshot request: {snapshot_request.url}")
+                    except Exception as e:
+                        logger.error(f"Failed to enqueue request {snapshot_request.url}: {str(e)}")
                 
                 return Response(meta['wayback_machine_original_request'].url, status=200)
             except Exception as e:
-                logger.error(f"Error processing CDX response: {str(e)}")
+                logger.error(f"Error processing CDX response: {str(e)}\nResponse text: {response.text[:500]}")
                 return response
 
         # For snapshot responses, restore the original URL
@@ -107,28 +125,46 @@ class WaybackMachineMiddleware:
 
     def build_cdx_request(self, request):
         try:
-            url_part = request.url.split('://')[1]
-        except IndexError:
-            url_part = request.url
+            # Split URL into parts and ensure proper encoding
+            url = request.url
+            if '://' in url:
+                # Remove port number if present and normalize the URL
+                base_url = url.split('://', 1)[1].split(':', 1)[0].strip('/')
+                if not base_url:
+                    base_url = url
+            else:
+                base_url = url.strip('/')
+
+            # Build CDX URL with proper encoding
+            cdx_url = 'https://web.archive.org/cdx/search/cdx'
+            cdx_url += '?url=' + pathname2url(base_url)
+            cdx_url += '&output=json&fl=timestamp,original,statuscode,digest'
+
+            logger.debug(f"Built CDX URL: {cdx_url}")
             
-        if os.name == 'nt':
-            cdx_url = self.cdx_url_template.format(url=pathname2url(url_part))
-        else:
-            cdx_url = self.cdx_url_template.format(url=pathname2url(url_part))
-            
-        cdx_request = Request(cdx_url, dont_filter=True)
-        cdx_request.meta['wayback_machine_original_request'] = request
-        cdx_request.meta['wayback_machine_cdx_request'] = True
-        return cdx_request
+            cdx_request = Request(
+                url=cdx_url,
+                dont_filter=True,
+                meta={
+                    'wayback_machine_original_request': request,
+                    'wayback_machine_cdx_request': True,
+                    'handle_httpstatus_list': list(range(400, 600))  # Handle all error status codes
+                }
+            )
+            return cdx_request
+        except Exception as e:
+            logger.error(f"Error building CDX request for {request.url}: {str(e)}")
+            return None
 
     def build_snapshot_requests(self, response, meta):
         try:
             data = json.loads(response.text)
-        except json.decoder.JSONDecodeError:
-            logger.error(f"Invalid JSON in CDX response for {response.url}")
+        except json.decoder.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in CDX response: {str(e)}")
             return []
 
         if len(data) < 2:
+            logger.debug("No snapshot data found in CDX response")
             return []
 
         keys, rows = data[0], data[1:]
@@ -140,24 +176,31 @@ class WaybackMachineMiddleware:
                     try:
                         time = datetime.strptime(row[i], self.timestamp_format)
                         new_dict['datetime'] = time.replace(tzinfo=timezone.utc)
-                    except ValueError:
+                    except ValueError as e:
+                        logger.error(f"Error parsing timestamp {row[i]}: {str(e)}")
                         new_dict['datetime'] = None
                 new_dict[key] = row[i]
             return new_dict
 
         snapshots = list(map(build_dict, rows))
+        filtered_snapshots = self.filter_snapshots(snapshots)
         snapshot_requests = []
 
-        for snapshot in self.filter_snapshots(snapshots):
-            url = self.snapshot_url_template.format(**snapshot)
-            original_request = meta['wayback_machine_original_request']
-            snapshot_request = original_request.replace(url=url, dont_filter=True)
-            snapshot_request.meta.update({
-                'wayback_machine_original_request': original_request,
-                'wayback_machine_url': url,
-                'wayback_machine_time': snapshot['datetime'],
-            })
-            snapshot_requests.append(snapshot_request)
+        for snapshot in filtered_snapshots:
+            try:
+                url = self.snapshot_url_template.format(**snapshot)
+                original_request = meta['wayback_machine_original_request']
+                snapshot_request = original_request.replace(url=url, dont_filter=True)
+                snapshot_request.meta.update({
+                    'wayback_machine_original_request': original_request,
+                    'wayback_machine_url': url,
+                    'wayback_machine_time': snapshot['datetime'],
+                    'handle_httpstatus_list': list(range(400, 600))  # Handle all error status codes
+                })
+                snapshot_requests.append(snapshot_request)
+            except Exception as e:
+                logger.error(f"Error building snapshot request: {str(e)}")
+                continue
 
         return snapshot_requests
 
@@ -172,10 +215,13 @@ class WaybackMachineMiddleware:
                 
             timestamp = snapshot['datetime'].timestamp()
             
-            if len(snapshot['statuscode']) != 3:
+            # Skip entries with invalid status codes
+            if not snapshot['statuscode'].isdigit():
                 continue
-                
-            if snapshot['statuscode'][0] == '3':
+            
+            status_code = int(snapshot['statuscode'])
+            # Skip redirect status codes and error codes
+            if status_code >= 300:
                 continue
 
             if not filtered_snapshots:
