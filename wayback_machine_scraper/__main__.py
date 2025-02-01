@@ -24,7 +24,7 @@ def main():
         ).format(get_distribution('wayback-machine-scraper').version),
         'LOG_LEVEL': 'DEBUG' if args.verbose else 'INFO',
         'DOWNLOADER_MIDDLEWARES': {
-            'scrapy_wayback_machine.WaybackMachineMiddleware': 5,
+            'wayback_machine_scraper.middleware.WaybackMachineMiddleware': 5,
         },
         'AUTOTHROTTLE_ENABLED': True,
         'AUTOTHROTTLE_DEBUG': args.verbose,
