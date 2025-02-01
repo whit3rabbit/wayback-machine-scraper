@@ -1,4 +1,5 @@
 import argparse
+import logging
 from pkg_resources import get_distribution
 
 from scrapy.crawler import CrawlerProcess
@@ -6,10 +7,10 @@ from scrapy.settings import Settings
 
 from .mirror_spider import MirrorSpider
 
-
 def main():
     # configure the settings for the crawler and spider
     args = parse_args()
+    
     config = {
         'domains': args.domains,
         'directory': args.output,
@@ -17,6 +18,7 @@ def main():
         'deny': args.deny,
         'unix': args.unix,
     }
+    
     settings = Settings({
         'USER_AGENT': (
             'Wayback Machine Scraper/{0} '
@@ -24,14 +26,19 @@ def main():
         ).format(get_distribution('wayback-machine-scraper').version),
         'LOG_LEVEL': 'DEBUG' if args.verbose else 'INFO',
         'DOWNLOADER_MIDDLEWARES': {
-            'scrapy_wayback_machine.WaybackMachineMiddleware': 5,
+            'wayback_machine_scraper.middleware.WaybackMachineMiddleware': 5,
         },
         'AUTOTHROTTLE_ENABLED': True,
         'AUTOTHROTTLE_DEBUG': args.verbose,
         'AUTOTHROTTLE_START_DELAY': 1,
         'AUTOTHROTTLE_TARGET_CONCURRENCY': args.concurrency,
-        'WAYBACK_MACHINE_TIME_RANGE': (getattr(args, 'from'), args.to),
+        'WAYBACK_MACHINE_TIME_RANGE': (args.from_time, args.to),
+        'LOG_FORMAT': '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+        'LOG_DATEFORMAT': '%Y-%m-%d %H:%M:%S',
     })
+
+    # Set up root logger
+    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     # start the crawler
     process = CrawlerProcess(settings)
@@ -50,10 +57,9 @@ def parse_args():
         'Can also be a full URL to specify starting points for the crawler.'
     ))
     parser.add_argument('-o', '--output', metavar='DIRECTORY', default='website', help=(
-        'Specify the domain(s) to scrape. '
-        'Can also be a full URL to specify starting points for the crawler.'
+        'Directory to save the mirrored snapshots.'
     ))
-    parser.add_argument('-f', '--from', metavar='TIMESTAMP', default='10000101', help=(
+    parser.add_argument('-f', '--from', dest='from_time', metavar='TIMESTAMP', default='10000101', help=(
         'The timestamp for the beginning of the range to scrape. '
         'Can either be YYYYmmdd, YYYYmmddHHMMSS, or a Unix timestamp.'
     ))
@@ -67,9 +73,9 @@ def parse_args():
     parser.add_argument('-d', '--deny', metavar='REGEX', default=(), help=(
         'A regular expression to exclude matched URLs.'
     ))
-    parser.add_argument('-c', '--concurrency', default=10.0, help=(
-        'Target concurrency for crawl requests.'
-        'The crawl rate will be automatically adjusted to match this target.'
+    parser.add_argument('-c', '--concurrency', type=float, default=10.0, help=(
+        'Target concurrency for crawl requests. '
+        'The crawl rate will be automatically adjusted to match this target. '
         'Use values less than 1 to be polite and higher values to scrape more quickly.'
     ))
     parser.add_argument('-u', '--unix', action='store_true', help=(
@@ -81,3 +87,7 @@ def parse_args():
     ))
 
     return parser.parse_args()
+
+
+if __name__ == '__main__':
+    main()
