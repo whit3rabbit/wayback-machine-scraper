@@ -8,9 +8,7 @@ except ImportError:
 
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.linkextractors import LinkExtractor
-
-from scrapy_wayback_machine import WaybackMachineMiddleware
-
+from scrapy.exceptions import DropItem
 
 class MirrorSpider(CrawlSpider):
     name = 'mirror_spider'
@@ -20,11 +18,11 @@ class MirrorSpider(CrawlSpider):
         self.directory = directory
         self.unix = unix
         self.rules = (
-            Rule(LinkExtractor(allow=allow, deny=deny), callback='save_page'),
+            Rule(LinkExtractor(allow=allow, deny=deny), callback='save_page', follow=True),
         )
-        self._compile_rules()  # Compile the rules so self._rules is set
+        self._compile_rules()
 
-        # initialize allowed_domains list
+        # Initialize allowed_domains list
         self.allowed_domains = []
 
         # Add common archive domains unconditionally
@@ -39,7 +37,7 @@ class MirrorSpider(CrawlSpider):
             url_parts = domain.split('://')
             unqualified_url = url_parts[-1]
             url_scheme = url_parts[0] if len(url_parts) > 1 else 'http'
-            full_url = '{0}://{1}'.format(url_scheme, unqualified_url)
+            full_url = f'{url_scheme}://{unqualified_url}'
             bare_domain = unqualified_url.split('/')[0]
             if bare_domain not in self.allowed_domains:
                 self.allowed_domains.append(bare_domain)
@@ -48,34 +46,58 @@ class MirrorSpider(CrawlSpider):
         super().__init__()
 
     def parse_start_url(self, response):
-        # Scrapy doesn't call callbacks for start URLs by default,
-        # so we iterate over rules and manually invoke callbacks if the link is allowed.
+        # Handle CDX API responses separately
+        if 'cdx/search/cdx' in response.url:
+            return None
+
+        # For regular responses, check if we have the required metadata
+        if not response.meta.get('wayback_machine_time'):
+            self.logger.warning(f"Missing wayback_machine_time metadata for {response.url}")
+            return None
+
+        # Process the response if it matches our rules
         for rule in self._rules:
             if rule.link_extractor._link_allowed(response):
                 if rule.callback:
                     callback = rule.callback if callable(rule.callback) else getattr(self, rule.callback)
                     return callback(response)
+        return None
 
     def save_page(self, response):
+        # Check if 'wayback_machine_time' is present in the response meta
+        if 'wayback_machine_time' not in response.meta:
+            self.logger.warning(f"Ignoring response without 'wayback_machine_time': {response.url}")
+            return
+
         # Ignore 404s
         if response.status == 404:
             return
 
-        # Create a directory structure based on the URL parts
-        url_parts = response.url.split('://')[1].split('/')
-        if os.name == 'nt':
-            url_parts = [quote_plus(url_part) for url_part in url_parts]
-        parent_directory = os.path.join(self.directory, *url_parts)
-        os.makedirs(parent_directory, exist_ok=True)
+        try:
+            # Create a directory structure based on the URL parts
+            url_parts = response.url.split('://')[1].split('/')
+            if os.name == 'nt':
+                url_parts = [quote_plus(url_part) for url_part in url_parts]
+            parent_directory = os.path.join(self.directory, *url_parts)
+            os.makedirs(parent_directory, exist_ok=True)
 
-        # Construct the output filename based on the snapshot time
-        time = response.meta['wayback_machine_time']
-        if self.unix:
-            filename = '{0}.snapshot'.format(time.timestamp())
-        else:
-            filename = '{0}.snapshot'.format(time.strftime(WaybackMachineMiddleware.timestamp_format))
-        full_path = os.path.join(parent_directory, filename)
+            # Construct the output filename based on the snapshot time
+            time = response.meta['wayback_machine_time']
+            if self.unix:
+                filename = '{0}.snapshot'.format(time.timestamp())
+            else:
+                filename = '{0}.snapshot'.format(time.strftime(WaybackMachineMiddleware.timestamp_format))
+            full_path = os.path.join(parent_directory, filename)
 
-        # Write the snapshot to disk
-        with open(full_path, 'wb') as f:
-            f.write(response.body)
+            # Write the snapshot to disk
+            with open(full_path, 'wb') as f:
+                f.write(response.body)
+
+            self.logger.debug(f"Successfully saved snapshot to {full_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving snapshot for {response.url}: {str(e)}")
+            return
+
+    def closed(self, reason):
+        self.logger.info(f"Spider closed: {reason}")
