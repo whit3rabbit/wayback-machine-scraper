@@ -32,7 +32,7 @@ setup(
     ],
     install_requires=[
         'cryptography',
-        'scrapy<2.12',
+        'scrapy<2.11',
         'scrapy-wayback-machine',
         'twisted',
     ]
