@@ -53,7 +53,7 @@ class MirrorSpider(CrawlSpider):
         for rule in self._rules:
             if rule.link_extractor._link_allowed(response):
                 if rule.callback:
-                    callback = getattr(self, rule.callback)
+                    callback = rule.callback if callable(rule.callback) else getattr(self, rule.callback)
                     return callback(response)
 
     def save_page(self, response):
